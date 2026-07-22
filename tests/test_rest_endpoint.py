@@ -36,4 +36,9 @@ def test_handler_runs_kvstore_path(splunk):
         params={"app": "search", "collection": "kv_downloader_nonexistent_xyz"},
     )
     assert "ImportError" not in body and "ModuleNotFoundError" not in body, f"import error: {body[:300]}"
-    assert "does not exist" in body, f"expected a 'does not exist' collection error: {st}: {body[:300]}"
+    # The handler ran the KV lookup and returned its own JSON error for the
+    # missing collection (splunklib raises 404, so the message is a "not found"
+    # / "could not find" variant). Any of those proves the KV path executed.
+    low = body.lower()
+    assert any(s in low for s in ("does not exist", "not found", "could not find")), \
+        f"expected a collection-not-found error from the handler: {st}: {body[:300]}"

@@ -1,0 +1,21 @@
+services:
+  splunk:
+    image: splunk/splunk:10.0
+    container_name: kv_downloader_splunk
+    hostname: splunk
+    environment:
+      SPLUNK_START_ARGS: --accept-license
+      SPLUNK_GENERAL_TERMS: --accept-sgt-current-at-splunk-com
+      SPLUNK_PASSWORD: ${SPLUNK_PASSWORD:-Changeme1!}
+      SPLUNK_HEC_TOKEN: ""
+    ports:
+      - "8000:8000"
+      - "8089:8089"
+    volumes:
+      - ../stage/kv_downloader:/opt/splunk/etc/apps/kv_downloader
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://localhost:8089/services/server/info", "-u", "admin:${SPLUNK_PASSWORD:-Changeme1!}"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 30s

@@ -2,8 +2,6 @@ import os
 import sys
 import re
 from os.path import dirname
-import requests
-import urllib3
 import base64
 
 ta_name = 'kv_downloader'

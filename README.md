@@ -2,6 +2,21 @@
 
 This Splunk app provides a REST endpoint for creating and downloading KVStore backups.
 
+## Compatibility
+
+| Attribute | Value |
+|-----------|-------|
+| **Python runtime** | 3.9, Splunk's long-term-support runtime (pinned) |
+| **Expected compatible** | Splunk Enterprise and Cloud 9.3+ and 10.x (any release on the Python 3.9 runtime) |
+| **Tested in CI** | Real-Splunk harness installs the app and exercises the REST handler end-to-end, plus AppInspect `cloud`, `future`, `private_victoria` on every push |
+| **Deployment roles** | Standalone, Distributed, Search Head Clustering |
+
+The persistent REST handler is pinned to the Python 3.9 LTS runtime
+(`python.required = 3.9`). It uses only the Splunk-provided `splunklib` and
+`http.client` (the unused `requests`/`urllib3` imports were removed), so nothing
+extra is vendored. It is not yet validated on the opt-in Python 3.13 runtime
+introduced in Splunk 10.2.
+
 ## Endpoint
 
 ### Create and Download Backup

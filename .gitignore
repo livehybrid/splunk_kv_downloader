@@ -1,2 +1,4 @@
-__pycache__
-**/*.pyc
+stage/
+dist/
+output/
+**/__pycache__/

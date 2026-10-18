@@ -27,10 +27,12 @@ jobs:
         run: |
           rm -rf stage dist && mkdir -p stage/kv_downloader dist
           cp -r bin default lib app.manifest README.md stage/kv_downloader/
-          # Stamp the tag's version (and a build derived from it, which must change
-          # every release) into the staged copy. Branch builds keep the repo version.
+          # Stamp <version>+<short sha> (and a build derived from the numeric part,
+          # which must change every release) into the staged copy. The version is
+          # the tag's, or the repo's on branch builds.
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"
           else V=$(python3 -c "import configparser as c;p=c.ConfigParser(interpolation=None);p.read('default/app.conf');print(p['launcher']['version'])"); fi
+          V="${V}+$(git rev-parse --short HEAD)"
           IFS=. read -r MAJ MIN PAT <<< "${V%%[-+]*}"
           if (( 10#$MIN > 99 || 10#${PAT:-0} > 99 )); then echo "::error::version $V does not fit the build scheme"; exit 1; fi
           BUILD=$(( 10#$MAJ * 10000 + 10#$MIN * 100 + 10#${PAT:-0} ))
@@ -44,12 +46,13 @@ jobs:
           p = 'stage/kv_downloader/app.manifest'; m = json.load(open(p))
           m['info']['id']['version'] = v; json.dump(m, open(p, 'w'), indent=2)
           PY
-          echo "V=$V" >> "$GITHUB_ENV"
           tar -C stage -czf "dist/kv_downloader-$V.tar.gz" kv_downloader
       - name: Verify package metadata
-        # Read back from the tarball, independently of the stamp step.
+        # Read back from the tarball. The expected version comes from the ref (or
+        # the repo's app.conf) and git, independently of the stamp step.
         shell: bash
         run: |
+          export SHORT_SHA=$(git rev-parse --short HEAD)
           python3 - <<'PY'
           import configparser, glob, json, os, tarfile
           t, = glob.glob('dist/*.tar.gz'); tf = tarfile.open(t)
@@ -57,12 +60,18 @@ jobs:
           c.read_string(tf.extractfile('kv_downloader/default/app.conf').read().decode())
           m = json.load(tf.extractfile('kv_downloader/app.manifest'))
           got = (c['launcher']['version'], c['id']['version'], c['install']['build'], m['info']['id']['version'])
-          v = os.environ['V']
+          ref = os.environ.get('GITHUB_REF', '')
+          if ref.startswith('refs/tags/v'):
+              base = ref[len('refs/tags/v'):]
+          else:
+              r = configparser.ConfigParser(interpolation=None); r.read('default/app.conf')
+              base = r['launcher']['version']
+          v = base + '+' + os.environ['SHORT_SHA']
           maj, mn, pat = (v.split('+')[0].split('-')[0].split('.') + ['0'])[:3]
           want = (v, v, str(int(maj) * 10000 + int(mn) * 100 + int(pat)), v)
           print(t, got)
           assert got == want, '%s != %s' % (got, want)
-          assert t.endswith('-' + os.environ['V'] + '.tar.gz'), t
+          assert t.endswith('-' + v + '.tar.gz'), t
           PY
       - uses: actions/upload-artifact@v4
         with:

@@ -96,6 +96,51 @@ jobs:
     secrets:
       token: "${{ secrets.GITHUB_TOKEN }}"
 
+  quality-appinspect-api:
+    # Splunk's hosted AppInspect (the vetting Splunkbase and Cloud run). The
+    # estate calls the shared appinspect-api.yml with SPLUNKBASE_* repo
+    # secrets; this repo has none, so the same action runs here with the
+    # splunk.com login read from 1Password (the token this repo already holds).
+    name: quality-appinspect-api
+    needs: appinspect
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: 1password/install-cli-action@v2
+      - name: Load splunk.com credentials from 1Password
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+        shell: bash
+        run: |
+          sb=$(op item get "splunkbase-credentials" --vault cicd --format json)
+          u=$(echo "$sb" | jq -r '[.fields[] | select(.id=="username" or .purpose=="USERNAME") | .value][0] // empty')
+          p=$(echo "$sb" | jq -r '[.fields[] | select(.id=="password" or .purpose=="PASSWORD") | .value][0] // empty')
+          if [ -z "$u" ] || [ -z "$p" ]; then echo "::error::1Password item splunkbase-credentials needs username + password"; exit 1; fi
+          # op values are not auto-masked like secrets.* are.
+          echo "::add-mask::$u"
+          echo "::add-mask::$p"
+          { echo "SB_USER=$u"; echo "SB_PASS=$p"; } >> "$GITHUB_ENV"
+      - name: Run AppInspect API
+        uses: splunk/appinspect-api-action@v3.0
+        with:
+          username: ${{ env.SB_USER }}
+          password: ${{ env.SB_PASS }}
+          app_path: dist
+          included_tags: private_victoria
+          excluded_tags: offensive
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppInspect_response.html
+          path: AppInspect_response.html
+          if-no-files-found: ignore
+
   integration-test:
     name: integration-test (splunk-docker)
     needs: package

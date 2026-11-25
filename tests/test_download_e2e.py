@@ -15,6 +15,7 @@ exports backups in batches of max_documents_per_batch_export_backup_kvservice
 from __future__ import annotations
 
 import base64
+import gzip
 import io
 import json
 import tarfile
@@ -104,7 +105,10 @@ def parse_backup(body, app, collection):
     """Independent decode: base64 -> gzip tar -> every JSON document under
     <app>/<collection>/. Returns (rows, member_names)."""
     raw = base64.b64decode(body, validate=True)
-    tf = tarfile.open(fileobj=io.BytesIO(raw), mode="r:*")
+    # Inflate the whole stream first: a truncated gzip of a near-empty tar can
+    # still list its members without error (mutant-kv-1 showed it).
+    tar_bytes = gzip.decompress(raw)
+    tf = tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:")
     rows, names = [], []
     for m in tf.getmembers():
         names.append(m.name)

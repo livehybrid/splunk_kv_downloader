@@ -36,24 +36,33 @@ APP = "kv_downloader"
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
 _CTX.verify_mode = ssl.CERT_NONE
-_AUTH = "Basic " + base64.b64encode(f"{USER}:{PW}".encode()).decode()
 
 
 class Splunk:
     """Minimal management-API client (urllib, JSON output_mode)."""
 
-    def request(self, method, path, data=None, params=None):
+    def __init__(self, user=USER, password=PW):
+        self.auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+    def request(self, method, path, data=None, params=None, json_body=None, timeout=90, raw=False):
         url = MGMT + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        body = urllib.parse.urlencode(data).encode() if data else None
+        if json_body is not None:
+            body = json.dumps(json_body).encode("utf-8")
+        else:
+            body = urllib.parse.urlencode(data, doseq=True).encode() if data else None
         req = urllib.request.Request(url, data=body, method=method)
-        req.add_header("Authorization", _AUTH)
+        req.add_header("Authorization", self.auth)
+        if json_body is not None:
+            req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, context=_CTX, timeout=90) as r:
-                return r.status, r.read().decode("utf-8", "replace")
+            with urllib.request.urlopen(req, context=_CTX, timeout=timeout) as r:
+                out = r.read()
+                return r.status, (out if raw else out.decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+            out = e.read()
+            return e.code, (out if raw else out.decode("utf-8", "replace"))
 
     def get_json(self, path, **params):
         params.setdefault("output_mode", "json")

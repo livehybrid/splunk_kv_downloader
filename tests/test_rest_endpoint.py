@@ -42,3 +42,13 @@ def test_handler_runs_kvstore_path(splunk):
     low = body.lower()
     assert any(s in low for s in ("does not exist", "not found", "could not find")), \
         f"expected a collection-not-found error from the handler: {st}: {body[:300]}"
+
+
+def test_app_registers_no_search_command(splunk):
+    """The app ships no search command. The old `kvbackup` stanza pointed at
+    the REST handler script and failed with "External search command exited
+    unexpectedly" wherever it was visible; this keeps a broken one from
+    coming back unnoticed."""
+    entries = splunk.entries(f"/servicesNS/nobody/{APP}/configs/conf-commands", count=0)
+    ours = [e["name"] for e in entries if e.get("acl", {}).get("app") == APP]
+    assert ours == [], f"{APP} registers search commands {ours}; add a real test for them"

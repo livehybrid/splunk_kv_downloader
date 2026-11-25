@@ -23,6 +23,13 @@ from splunk.persistconn.application import PersistentServerConnectionApplication
 import splunk.Intersplunk as si
 from splunklib import client as client
 
+def _http_status(exc):
+    """Pass splunkd's refusal through (403 for a missing capability, 404 for a
+    collection the user cannot see) instead of reporting every error as 500."""
+    status = getattr(exc, 'status', None)
+    return status if isinstance(status, int) and 400 <= status < 600 else 500
+
+
 class RequestInfo(object):
     def __init__(self, user, session_key, method, path, query, raw_args):
         self.user = user
@@ -114,7 +121,7 @@ class KVBackup(PersistentServerConnectionApplication):
                         'success': False,
                         'message': f'Error checking if collection exists: {str(e)}'
                     }),
-                    'status': 500,
+                    'status': _http_status(e),
                     'headers': {
                         'Content-Type': 'application/json'
                     },
@@ -259,7 +266,7 @@ class KVBackup(PersistentServerConnectionApplication):
                     'success': False,
                     'message': f'Error creating and downloading backup: {str(e)}'
                 }),
-                'status': 500,
+                'status': _http_status(e),
                 'headers': {
                     'Content-Type': 'application/json'
                 },

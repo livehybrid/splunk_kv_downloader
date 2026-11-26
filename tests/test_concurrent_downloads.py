@@ -18,16 +18,19 @@ import base64
 import gzip
 import io
 import json
+import subprocess
 import tarfile
 import threading
+import time
 
 import pytest
 
-from conftest import Splunk, docker_exec
+from conftest import CONTAINER, Splunk, docker_exec
 from test_download_e2e import TA, _create_collection, _seed, download, kv  # noqa: F401
 
 BACKUP_DIR = "/opt/splunk/var/lib/splunk/kvstorebackup"
 SENTINEL = "aios_sentinel_not_ours.tar.gz"
+DECOY = "aios_decoy_backup.tar.gz"
 ROUNDS = 2
 
 
@@ -122,3 +125,44 @@ def test_downloads_remove_only_their_own_backup(two_collections):
     after = _list_backup_dir()
     assert SENTINEL in after, f"a backup that was not the handler's was deleted: {after}"
     assert after == before, f"backup directory changed: before {before}, after {after}"
+
+
+def _put_file_in_backup_dir(name, data):
+    """Write `data` into the backup directory atomically (temp file, then mv),
+    as the splunk user, so it appears complete in one step."""
+    tmp = f"/tmp/{name}.part"
+    p = subprocess.run(["docker", "exec", "-i", "-u", "splunk", CONTAINER, "sh", "-c",
+                        f"cat > {tmp} && mv {tmp} {BACKUP_DIR}/{name}"],
+                       input=data, capture_output=True, timeout=60)
+    assert p.returncode == 0, p.stderr.decode()[:300]
+
+
+def test_foreign_backup_during_download_is_ignored_and_kept(two_collections):
+    """The ordering that crosses downloads: another complete backup tarball
+    lands in kvstorebackup/ while a download is still waiting for its own.
+    The decoy is a genuine backup of conc_small; the request is for conc_big.
+    The download must still carry conc_big's rows, and the decoy, which is not
+    the handler's, must still be there afterwards."""
+    st, small_body = download(Splunk(), "conc_small")
+    assert st == 200, f"download conc_small -> {st}: {small_body[:300]}"
+    decoy_bytes = base64.b64decode(small_body)
+    docker_exec("sh", "-c", f"rm -f {BACKUP_DIR}/{DECOY}")
+    before = _list_backup_dir()
+
+    out = {}
+    t = threading.Thread(target=lambda: out.update(big=download(Splunk(), "conc_big")))
+    t.start()
+    time.sleep(1.0)
+    _put_file_in_backup_dir(DECOY, decoy_bytes)
+    t.join(timeout=900)
+
+    st, body = out["big"]
+    assert st == 200, f"download conc_big -> {st}: {body[:300]}"
+    got = _content_fingerprint(_rows_any_path(body))
+    want = _content_fingerprint(two_collections["conc_big"])
+    assert got == want, (f"download of conc_big carried {len(got)} rows (first {got[:2]}), "
+                         f"expected {len(want)} (first {want[:2]})")
+    after = _list_backup_dir()
+    assert DECOY in after, f"the foreign backup was deleted: {after}"
+    assert sorted(set(after) - {DECOY}) == before, f"backup directory changed: before {before}, after {after}"
+    docker_exec("sh", "-c", f"rm -f {BACKUP_DIR}/{DECOY}")

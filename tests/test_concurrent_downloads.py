@@ -32,6 +32,10 @@ BACKUP_DIR = "/opt/splunk/var/lib/splunk/kvstorebackup"
 SENTINEL = "aios_sentinel_not_ours.tar.gz"
 DECOY = "aios_decoy_backup.tar.gz"
 ROUNDS = 2
+# Big enough that its backup is still being written when the decoy lands
+# (30,000 rows finished first on 10.0 and hid a crossed download there).
+BIG_N = 100_000
+DECOY_DELAY = 0.3
 
 
 def _rows_any_path(body):
@@ -70,7 +74,7 @@ def two_collections(kv):  # noqa: F811
     small = [{"_key": f"s{i}", "name": f"small {i}", "qty": i, "price": 1.0, "active": True}
              for i in range(5)]
     big = [{"_key": f"b{i:05d}", "name": f"big {i}", "qty": i, "price": 2.0, "active": False}
-           for i in range(30_000)]
+           for i in range(BIG_N)]
     _create_collection(kv, "conc_small")
     _seed(kv, "conc_small", small)
     _create_collection(kv, "conc_big")
@@ -152,7 +156,7 @@ def test_foreign_backup_during_download_is_ignored_and_kept(two_collections):
     out = {}
     t = threading.Thread(target=lambda: out.update(big=download(Splunk(), "conc_big")))
     t.start()
-    time.sleep(1.0)
+    time.sleep(DECOY_DELAY)
     _put_file_in_backup_dir(DECOY, decoy_bytes)
     t.join(timeout=900)
 

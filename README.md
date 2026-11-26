@@ -74,7 +74,11 @@ curl 'https://splunkrest.cloud.livehybrid.com/services/kv_downloader?app=search&
 
 ## Notes
 
-- Backup files are stored in `$SPLUNK_DB/kvstorebackup/`
+- Backup files are made in `$SPLUNK_DB/kvstorebackup/` under a name unique to each request
+  (`kvdl_<app>_<collection>_<random>.tar.gz`). The handler returns exactly that file and then
+  deletes it; other files in the directory (your own backups, other downloads) are left alone.
+- Splunk runs one KV store backup at a time. A download that arrives while another backup is
+  running waits its turn (up to 5 minutes in all) instead of failing with 503.
 - The app uses Splunk's built-in KVStore backup functionality
 - **Important:** All operations use the authenticated user's session token, not a system token. This means users can only backup and download collections they have permission to access
 - Collections are validated for existence before backup creation

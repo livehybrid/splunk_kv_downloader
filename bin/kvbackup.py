@@ -17,11 +17,32 @@ import json
 import logging
 import re
 import time
-import glob
+import uuid
 from splunk.clilib.bundle_paths import make_splunkhome_path
 from splunk.persistconn.application import PersistentServerConnectionApplication
 import splunk.Intersplunk as si
 from splunklib import client as client
+
+BACKUP_BUSY_RETRY_SECONDS = 2
+
+
+def _safe_name_part(value, limit=60):
+    """Collection and app names reach the archive file name; keep only
+    characters that cannot step out of the backup directory."""
+    return re.sub(r'[^A-Za-z0-9_-]', '_', str(value))[:limit] or 'x'
+
+
+def unique_archive_name(app_name, collection_name):
+    """A backup name no other request can produce. Splunk appends .tar.gz."""
+    return 'kvdl_{}_{}_{}'.format(_safe_name_part(app_name), _safe_name_part(collection_name),
+                                  uuid.uuid4().hex)
+
+
+def _backup_busy(exc):
+    """Splunk runs one KV store backup at a time and answers a second one with
+    503 "KVStore backup or restore is already running or not available!"."""
+    return getattr(exc, 'status', None) == 503
+
 
 def _http_status(exc):
     """Pass splunkd's refusal through (403 for a missing capability, 404 for a
@@ -75,19 +96,18 @@ class KVBackup(PersistentServerConnectionApplication):
                     'message': 'app and collection parameters are required'
                 }),
             }
-        archive_name = f"{app_name}_{collection_name}_{int(time.time())}"
+        # Each request names its own backup, waits for exactly that file and
+        # removes only that file. It never takes "a new tarball" from the
+        # directory, which another request or an admin's backup may also be
+        # writing to.
+        archive_name = unique_archive_name(app_name, collection_name)
 
         try:
             # Get backup directory path
             splunk_db = os.environ.get('SPLUNK_DB', '/opt/splunk/var/lib/splunk')
             backup_dir = os.path.join(splunk_db, 'kvstorebackup')
             
-            # List existing backups before creating new one
-            existing_backups = []
-            if os.path.exists(backup_dir):
-                existing_backups = [f for f in os.listdir(backup_dir) if os.path.isfile(os.path.join(backup_dir, f))]
-            
-            self.logger.info(f"Existing backup files before creating new one: {existing_backups}")
+            backup_file = os.path.join(backup_dir, archive_name + '.tar.gz')
 
             # Create Splunk client connection
             service = client.connect(
@@ -136,9 +156,23 @@ class KVBackup(PersistentServerConnectionApplication):
                 'parallelCollections': '1'
             }
 
-            # Make the backup request
-            backup_response = service.post('/services/kvstore/backup/create', **backup_params)
-            
+            max_wait_time = 300  # 5 minutes maximum wait, including time queued behind other backups
+            wait_interval = 2
+            deadline = time.time() + max_wait_time
+
+            # Splunk refuses a backup while another is running (503). Wait our
+            # turn rather than fail a concurrent download.
+            while True:
+                try:
+                    backup_response = service.post('/services/kvstore/backup/create', **backup_params)
+                    break
+                except Exception as e:
+                    if _backup_busy(e) and time.time() < deadline:
+                        self.logger.info(f"Another KV store backup is running; retrying {archive_name}")
+                        time.sleep(BACKUP_BUSY_RETRY_SECONDS)
+                        continue
+                    raise
+
             if backup_response.status != 200:
                 return {
                     'payload': json.dumps({
@@ -150,88 +184,35 @@ class KVBackup(PersistentServerConnectionApplication):
                         'Content-Type': 'application/json'
                     },
                 }
-            
+
             self.logger.info(f"Backup creation initiated for: {archive_name}")
-            # self.logger.info(f"Backup creation response: {backup_response.body.read()}")
-            # Wait for the backup to complete and the tarball to be created
-            max_wait_time = 300  # 5 minutes maximum wait
-            wait_interval = 2    # Check every 2 seconds
-            elapsed_time = 0
-            
-            while elapsed_time < max_wait_time:
-                # Check for new backup files that weren't in the original list
-                current_backups = []
-                if os.path.exists(backup_dir):
-                    # Get both files and directories
-                    current_items = os.listdir(backup_dir)
-                    current_backups = [f for f in current_items if os.path.isfile(os.path.join(backup_dir, f))]
-                    current_dirs = [f for f in current_items if os.path.isdir(os.path.join(backup_dir, f))]
-                
-                # Find new backup files (not in the original list)
-                new_backups = [f for f in current_backups if f not in existing_backups]
-                
-                # Look for tarball files specifically (usually .tar.gz)
-                new_tarballs = [f for f in new_backups if f.endswith('.tar.gz') or f.endswith('.tar')]
-                
-                if new_tarballs:
-                    # Found new tarball, check if file size is stable
-                    backup_file = os.path.join(backup_dir, new_tarballs[0])
-                    self.logger.info(f"Found new backup tarball: {new_tarballs[0]}")
+            # Wait for exactly our tarball, and for its size to settle.
+            while True:
+                if os.path.isfile(backup_file):
                     if self._is_file_size_stable(backup_file, stable_duration=10):
-                        self.logger.info(f"Tarball file size is stable, proceeding with download: {new_tarballs[0]}")
+                        self.logger.info(f"Backup file is complete: {os.path.basename(backup_file)}")
                         break
-                    else:
-                        self.logger.info(f"Tarball file size still changing, continuing to wait: {new_tarballs[0]}")
-                
-                # Check if there's a directory with our archive name (backup in progress)
-                backup_dir_name = os.path.join(backup_dir, archive_name)
-                if os.path.exists(backup_dir_name) and os.path.isdir(backup_dir_name):
-                    self.logger.info(f"Backup directory exists, waiting for tarball creation: {archive_name}")
-                
-                # Also check for backup files matching our archive name pattern
-                backup_pattern = os.path.join(backup_dir, f"{archive_name}*")
-                backup_items = glob.glob(backup_pattern)
-                
-                # Filter out directories and only keep files
-                backup_files = [item for item in backup_items if os.path.isfile(item)]
-                
-                if backup_files:
-                    # Get the most recent file
-                    backup_file = max(backup_files, key=os.path.getctime)
-                    filename = os.path.basename(backup_file)
-                    
-                    # Verify this is a new file (not in existing backups)
-                    if filename not in existing_backups:
-                        self.logger.info(f"Found new backup file: {filename}")
-                        # Check if file size is stable (not being written to)
-                        if self._is_file_size_stable(backup_file, stable_duration=10):
-                            self.logger.info(f"File size is stable, proceeding with download: {filename}")
-                            break
-                        else:
-                            self.logger.info(f"File size still changing, continuing to wait: {filename}")
-                
-                # Wait before checking again
+                    self.logger.info(f"Backup file still being written: {os.path.basename(backup_file)}")
+                if time.time() >= deadline:
+                    return {
+                        'payload': json.dumps({
+                            'success': False,
+                            'message': f'Backup creation timed out after {max_wait_time} seconds'
+                        }),
+                        'status': 408,
+                        'headers': {
+                            'Content-Type': 'application/json'
+                        },
+                    }
                 time.sleep(wait_interval)
-                elapsed_time += wait_interval
-                self.logger.info(f"Waiting for backup completion... ({elapsed_time}s elapsed)")
-            
-            else:
-                # Timeout reached
-                return {
-                    'payload': json.dumps({
-                        'success': False,
-                        'message': f'Backup creation timed out after {max_wait_time} seconds'
-                    }),
-                    'status': 408,
-                    'headers': {
-                        'Content-Type': 'application/json'
-                    },
-                }
 
             try:
-                # Read and stream the file
-                with open(backup_file, 'rb') as f:
-                    file_content = f.read()
+                # Read the file, then remove it: it was made for this request only.
+                try:
+                    with open(backup_file, 'rb') as f:
+                        file_content = f.read()
+                finally:
+                    self._remove_own_backup(backup_file)
                 
                 # Get file name for download
                 filename = os.path.basename(backup_file)
@@ -333,6 +314,13 @@ class KVBackup(PersistentServerConnectionApplication):
                 'payload': str(exception),
                 'status': 500
             }
+
+    def _remove_own_backup(self, backup_file):
+        try:
+            os.remove(backup_file)
+            self.logger.info(f"Removed backup file: {os.path.basename(backup_file)}")
+        except OSError as e:
+            self.logger.warning(f"Could not remove backup file {backup_file}: {e}")
 
     def _is_file_size_stable(self, filepath, stable_duration=10):
         """
